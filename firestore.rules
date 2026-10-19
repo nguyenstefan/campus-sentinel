@@ -1,5 +1,10 @@
 rules_version = '2';
 
+// Security rules for Campus Sentinel.
+// Anyone may READ reports (the dashboard is public) and CREATE a report,
+// but only if it has exactly the expected shape. Nobody can edit or
+// delete reports from the website; the project owner can still delete
+// them in the Firebase console.
 service cloud.firestore {
   match /databases/{database}/documents {
 
