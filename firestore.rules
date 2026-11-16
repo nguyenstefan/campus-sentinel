@@ -1,0 +1,104 @@
+rules_version = '2';
+
+// Security rules for Campus Sentinel.
+// Anyone may READ reports (the dashboard is public) and CREATE a report,
+// but only if it has exactly the expected shape. Wastewater samples can be
+// read by anyone but added only by signed-in uploaders on the list below. Nobody can edit or
+// delete reports from the website; the project owner can still delete
+// them in the Firebase console.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function validReport(d) {
+      return d.keys().hasOnly(['campuses', 'residence', 'onset', 'symptoms', 'maxTempF',
+                               'severity', 'contacts', 'sharedMeal', 'travel',
+                               'sawProvider', 'submittedAt', 'demo'])
+        && d.keys().hasAll(['campuses', 'residence', 'onset', 'symptoms', 'severity',
+                            'contacts', 'sharedMeal', 'travel', 'sawProvider', 'submittedAt'])
+        && d.campuses is list && d.campuses.size() >= 1 && d.campuses.size() <= 6
+        && d.residence is string && d.residence.size() <= 40
+        && d.onset is string && d.onset.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && d.symptoms is list && d.symptoms.size() >= 1 && d.symptoms.size() <= 25
+        && (!('maxTempF' in d) || d.maxTempF == null
+            || (d.maxTempF is number && d.maxTempF >= 95 && d.maxTempF <= 108))
+        && d.severity in ['mild', 'moderate', 'severe']
+        && d.contacts in ['yes', 'no', 'unsure']
+        && d.sharedMeal is bool && d.travel is bool && d.sawProvider is bool
+        && d.submittedAt is string && d.submittedAt.size() <= 40
+        && (!('demo' in d) || d.demo is bool);
+    }
+
+    function validWastewater(d) {
+      return d.keys().hasOnly(['site', 'target', 'date', 'copiesPerL', 'pmmovPerL', 'submittedAt', 'demo'])
+        && d.keys().hasAll(['site', 'target', 'date', 'copiesPerL', 'submittedAt'])
+        && d.site is string && d.site.size() <= 40
+        && d.target is string && d.target.size() <= 20
+        && d.date is string && d.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && d.copiesPerL is number && d.copiesPerL >= 0 && d.copiesPerL <= 1000000000000
+        && (!('pmmovPerL' in d) || d.pmmovPerL == null || (d.pmmovPerL is number && d.pmmovPerL > 0))
+        && d.submittedAt is string && d.submittedAt.size() <= 40
+        && (!('demo' in d) || d.demo is bool);
+    }
+
+    match /reports/{reportId} {
+      allow read: if true;
+      allow create: if validReport(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Only these signed-in Google accounts may upload wastewater results.
+    // Replace YOUR-EMAIL@asu.edu with the uploader's email (add more, comma-separated).
+    // Lab data must come from a trusted source: one fake sample would show a
+    // "high" alert on every dashboard.
+    function isLabUploader() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in ['YOUR-EMAIL@asu.edu'];
+    }
+
+    // One SARS-CoV-2 sequencing result: lineage shares for one site and date (from Freyja).
+    function validLineages(d) {
+      return d.keys().hasOnly(['site', 'date', 'lineages', 'submittedAt', 'demo'])
+        && d.keys().hasAll(['site', 'date', 'lineages', 'submittedAt'])
+        && d.site is string && d.site.size() <= 40
+        && d.date is string && d.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && d.lineages is list && d.lineages.size() >= 1 && d.lineages.size() <= 40
+        && d.submittedAt is string && d.submittedAt.size() <= 40
+        && (!('demo' in d) || d.demo is bool);
+    }
+
+    match /lineages/{sampleId} {
+      allow read: if true;
+      allow create: if isLabUploader() && validLineages(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Demo feed posts: anyone in class can add a short, anonymous post. Nobody can edit or delete
+    // them from the website (the owner can clear them in the Firebase console after the demo).
+    function validPost(d) {
+      return d.keys().hasOnly(['text', 'createdAt', 'demo'])
+        && d.text is string && d.text.size() >= 1 && d.text.size() <= 280
+        && d.createdAt is string && d.createdAt.size() <= 40
+        && d.demo == true;
+    }
+
+    match /media_posts/{postId} {
+      allow read: if true;
+      allow create: if validPost(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // NLP results: written only by the worker, which uses the Firebase Admin SDK
+    // (the Admin SDK bypasses these rules). Browsers can only read them.
+    match /media_extracted/{postId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /wastewater/{sampleId} {
+      allow read: if true;
+      allow create: if isLabUploader() && validWastewater(request.resource.data);
+      allow update, delete: if false;
+    }
+  }
+}

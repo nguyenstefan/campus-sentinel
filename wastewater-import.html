@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel Wastewater Import</title>
+<meta name="robots" content="noindex">
+<style>
+  body { margin: 0; padding: 32px 16px; font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; background: #F6F4F5; color: #1F1A1C; }
+  main { max-width: 70ch; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { margin: 0; font-size: 1.5rem; }
+  h2 { margin: 12px 0 0; font-size: 1.15rem; }
+  textarea { width: 100%; min-height: 12em; font: 0.85rem/1.4 ui-monospace, Menlo, monospace; padding: 10px; border: 1px solid #DDD5D9; border-radius: 8px; box-sizing: border-box; }
+  button { font: inherit; font-weight: 600; background: #8C1D40; color: #fff; border: 0; border-radius: 10px; padding: 12px 18px; cursor: pointer; }
+  button.ghost { background: #EFEAEC; color: #1F1A1C; }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .signin { background: #fff; border: 1px solid #DDD5D9; border-radius: 10px; padding: 12px 14px; }
+  #log { font: 0.85rem/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #fff; border: 1px solid #DDD5D9; border-radius: 8px; padding: 12px; min-height: 3em; }
+  a { color: #8C1D40; } code { background: #EFEAEC; padding: 1px 4px; border-radius: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Load wastewater data</h1>
+
+  <!-- Only signed-in uploaders listed in firestore.rules can add samples. -->
+  <div class="signin row">
+    <span id="who">Checking sign-in…</span>
+    <button id="signIn" hidden>Sign in with Google</button>
+    <button id="signOut" class="ghost" hidden>Sign out</button>
+  </div>
+
+  <h2>Wastewater test results</h2>
+  <p>Paste or upload a CSV from the treatment facility's lab. Columns, in this order, with a header row:</p>
+  <p><code>date,site,target,copies_per_l,pmmov_copies_per_l</code></p>
+  <p>Dates are <code>YYYY-MM-DD</code> (the sample date, not the lab report date). <code>site</code> and <code>target</code> must be ids from <code>wastewater-config.js</code>. Use <code>0</code> for a non-detect. <code>pmmov_copies_per_l</code> is optional but recommended; include it for every row or for none. Samples already in the database are skipped, so uploading the same file twice is safe. Do not include any personal or facility-confidential data: this database is publicly readable.</p>
+  <textarea id="csv" spellcheck="false" placeholder="date,site,target,copies_per_l,pmmov_copies_per_l&#10;2026-10-12,tempe-campus,noro,24000,1100000&#10;2026-10-12,tempe-campus,sars2,0,1100000"></textarea>
+  <div class="row">
+    <input type="file" id="file" accept=".csv,text/csv">
+    <button id="go" disabled>Upload samples</button>
+    <button id="demo" class="ghost" disabled>Add example wastewater data (version 2)</button>
+  </div>
+
+  <h2>SARS-CoV-2 lineages (sequencing)</h2>
+  <p>Lineage shares for each sample, as estimated by <b>Freyja</b> from sequencing reads. One row per lineage, with a header row:</p>
+  <p><code>date,site,lineage,abundance</code></p>
+  <p><code>abundance</code> is a fraction from 0 to 1, as Freyja reports it; a sample's rows should add up to about 1. Freyja's <code>aggregate</code> output lists a sample's lineages and abundances on one line, separated by spaces: put each pair on its own row here, with that sample's date and site.</p>
+  <textarea id="lcsv" spellcheck="false" placeholder="date,site,lineage,abundance&#10;2026-10-12,tempe-campus,XFG,0.41&#10;2026-10-12,tempe-campus,LP.8.1,0.37&#10;2026-10-12,tempe-campus,NB.1.8.1,0.18"></textarea>
+  <div class="row">
+    <input type="file" id="lfile" accept=".csv,text/csv">
+    <button id="lgo" disabled>Upload lineages</button>
+    <button id="ldemo" class="ghost" disabled>Add example lineage data (version 2)</button>
+  </div>
+
+  <div id="log">Ready.</div>
+  <p><a href="./#dashboard">Open the dashboard</a></p>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js?v=5"></script>
+<script src="wastewater-config.js?v=5"></script>
+<script>
+const $ = id => document.getElementById(id);
+const log = m => { $("log").textContent = m; };
+const SITES = new Set(WW_SITES.map(s => s.id)), TARGETS = new Set(WW_TARGETS.map(t => t.id));
+const isoDate = ago => { const d = new Date(); d.setDate(d.getDate() - ago); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
+
+// A real calendar date? (The pattern alone would accept 2026-13-40.)
+function isRealDate(str) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str || "")) return false;
+  const [y, m, d] = str.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
+// One document id per site + target + date, so the same sample can't be stored twice.
+// Example data carries a version, so a newer version uploads even if an older one is still stored;
+// the dashboard keeps the newest sample for each site, target and date.
+const WW_DEMO_VERSION = 2;
+const sampleId = d => (d.demo ? "demo-v" + WW_DEMO_VERSION + "_" : "") + d.date + "_" + d.site + "_" + d.target;
+
+// CSV text -> { docs, errors }. Every row is checked before anything is uploaded.
+// Row numbers match the line numbers in the file, header included.
+function parseCsv(text) {
+  const docs = [], errors = [];
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim(), lineNo = i + 1;
+    if (!line || (lineNo === 1 && /^date\s*,/i.test(line))) return;   // skip blanks and the header
+    const [date, site, target, copies, pmmov] = line.split(",").map(x => x.trim().replace(/^"|"$/g, ""));
+    const c = Number(copies), p = pmmov ? Number(pmmov) : null;
+    const bad = !isRealDate(date) ? "date must be a real date written YYYY-MM-DD"
+      : date > isoDate(0) ? "date is in the future"
+      : !SITES.has(site) ? "unknown site '" + site + "'"
+      : !TARGETS.has(target) ? "unknown target '" + target + "'"
+      : !(copies !== "" && Number.isFinite(c) && c >= 0 && c <= 1e12) ? "copies_per_l must be a number from 0 to 1,000,000,000,000"
+      : (p !== null && !(Number.isFinite(p) && p > 0)) ? "pmmov must be a positive number" : null;
+    if (bad) { errors.push("Line " + lineNo + ": " + bad); return; }
+    docs.push({ site, target, date, copiesPerL: c, ...(p ? { pmmovPerL: p } : {}), submittedAt: new Date().toISOString() });
+  });
+  return { docs, errors };
+}
+
+// Example data: quiet baselines, with a few planted surges that line up with the symptom examples in seed.html.
+function buildDemo() {
+  let seed = 11; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const base = { sars2: 8000, fluA: 2500, fluB: 1500, rsv: 1800, noro: 20000, rota: 900, salm: 600, crypto: 60 };
+  const surge = { "tempe-hassayampa|noro": 6, "tempe-campus|noro": 3, "dtphx-campus|fluA": 4, "west-campus|salm": 3.5 };
+  const out = [];
+  // Samples every 3 days. Surges start about 9 days ago at half strength and build to their
+  // peak today, so wastewater rises several days before the matching symptom reports in seed.html.
+  for (let ago = 0; ago <= 36; ago += 3) {
+    for (const s of WW_SITES) for (const t of WW_TARGETS) {
+      const m = surge[s.id + "|" + t.id] || 1;
+      const f = ago <= 9 ? 1 + (m - 1) * (1 - ago / 18) : 1;
+      const nonDetect = t.category !== "viral" && f === 1 && rand() < 0.15;   // bacteria and parasites are often not detected
+      out.push({ site: s.id, target: t.id, date: isoDate(ago),
+        copiesPerL: nonDetect ? 0 : Math.round(base[t.id] * f * (0.75 + 0.5 * rand())),
+        pmmovPerL: Math.round(1e6 * (0.7 + 0.6 * rand())),
+        submittedAt: new Date().toISOString(), demo: true });
+    }
+  }
+  return out;
+}
+
+// ---------- SARS-CoV-2 lineages ----------
+// Example data carries a version in its id, so a new version uploads even if the old one is still stored.
+// The dashboard keeps only the newest sample for each site and date.
+const LINEAGE_DEMO_VERSION = 2;
+const lineageId = d => (d.demo ? "demo-v" + LINEAGE_DEMO_VERSION + "_" : "") + d.date + "_" + d.site;
+
+// Long CSV (one row per lineage) -> one document per site + date.
+function parseLineageCsv(text) {
+  const groups = new Map(), errors = [];
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim(), lineNo = i + 1;
+    if (!line || (lineNo === 1 && /^date\s*,/i.test(line))) return;
+    const [date, site, lineage, abundance] = line.split(",").map(x => x.trim().replace(/^"|"$/g, ""));
+    const f = Number(abundance);
+    const bad = !isRealDate(date) ? "date must be a real date written YYYY-MM-DD"
+      : date > isoDate(0) ? "date is in the future"
+      : !SITES.has(site) ? "unknown site '" + site + "'"
+      : !/^[A-Za-z0-9._-]{1,40}$/.test(lineage || "") ? "lineage name must be letters, numbers, dots or dashes"
+      : !(abundance !== "" && Number.isFinite(f) && f >= 0 && f <= 1) ? "abundance must be a fraction from 0 to 1" : null;
+    if (bad) { errors.push("Line " + lineNo + ": " + bad); return; }
+    const key = date + "|" + site;
+    if (!groups.has(key)) groups.set(key, { site, date, lineages: [], lines: [] });
+    const g = groups.get(key);
+    g.lineages.push({ lineage, share: f }); g.lines.push(lineNo);
+  });
+  const docs = [];
+  groups.forEach(g => {
+    const total = g.lineages.reduce((a, x) => a + x.share, 0);
+    if (total < 0.5 || total > 1.05) { errors.push("Lines " + g.lines.join(", ") + ": abundances for " + g.site + " on " + g.date + " add up to " + total.toFixed(2) + " (expected about 1)"); return; }
+    if (g.lineages.length > 40) { errors.push("Lines " + g.lines[0] + "\u2013: more than 40 lineages in one sample"); return; }
+    docs.push({ site: g.site, date: g.date, lineages: g.lineages, submittedAt: new Date().toISOString() });
+  });
+  return { docs, errors };
+}
+
+// Example lineage data: weekly samples for 8 weeks at 4 sites. XFG reaches Tempe first and
+// takes over fast; Downtown follows more slowly and has more minor lineages; West Valley is
+// mid-takeover now; Polytechnic keeps a different, stable mix (a separate introduction).
+// Each site has its own starting mix and speed, as real sites would.
+function buildLineageDemo() {
+  let seed = 23; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const SITES = {
+    //               week XFG hits half its max, takeover speed, max XFG share, starting mix, minor lineages (shown as Other)
+    "tempe-campus": { mid: 3.5, speed: 1.8, max: 0.85, mix: { "LP.8.1": 0.55, "NB.1.8.1": 0.27, "XEC": 0.18 }, minor: { "BA.2.86": 0.04 } },
+    "dtphx-campus": { mid: 5.0, speed: 0.9, max: 0.70, mix: { "LP.8.1": 0.38, "NB.1.8.1": 0.32, "XEC": 0.30 }, minor: { "BA.2.86": 0.05, "KP.3.1.1": 0.05 } },
+    "west-campus":  { mid: 6.5, speed: 1.2, max: 0.65, mix: { "LP.8.1": 0.68, "NB.1.8.1": 0.20, "XEC": 0.12 }, minor: { "BA.2.86": 0.03 } },
+    "poly-campus":  { mid: 99,  speed: 1.0, max: 0,    mix: { "NB.1.8.1": 0.58, "LP.8.1": 0.30, "XEC": 0.12 }, minor: { "BA.2.86": 0.04 } },
+  };
+  const out = [];
+  for (const [site, c] of Object.entries(SITES)) {
+    const minorTotal = Object.values(c.minor).reduce((a, b) => a + b, 0);
+    for (let w = 0; w < 8; w++) {
+      const ago = (7 - w) * 7;
+      const xfg = c.max / (1 + Math.exp(-(w - c.mid) * c.speed));                 // logistic takeover
+      const rest = 1 - xfg - minorTotal;
+      const lineages = [{ lineage: "XFG", share: xfg }];
+      for (const k in c.mix) lineages.push({ lineage: k, share: rest * c.mix[k] * (0.85 + 0.3 * rand()) });
+      for (const k in c.minor) lineages.push({ lineage: k, share: c.minor[k] });
+      const total = lineages.reduce((a, x) => a + x.share, 0);
+      out.push({ site, date: isoDate(ago), demo: true, submittedAt: new Date().toISOString(),
+        // Freyja shares usually add up to a bit under 1 (some reads aren't assigned): scale to 0.97.
+        lineages: lineages.filter(x => x.share >= 0.005).map(x => ({ lineage: x.lineage, share: Math.round(1000 * x.share / total * 0.97) / 1000 })) });
+    }
+  }
+  return out;
+}
+
+// ---------- Firebase setup and sign-in ----------
+let db = null, auth = null;
+function setButtons(enabled) { ["go", "demo", "lgo", "ldemo"].forEach(id => { $(id).disabled = !enabled; }); }
+
+(function start() {
+  const c = window.FIREBASE_CONFIG;
+  if (!window.firebase) { $("who").textContent = "The Firebase library didn't load. Check your connection or content blocker and reload."; return; }
+  if (!c || String(c.projectId).startsWith("PASTE")) { $("who").textContent = "firebase-config.js is missing or still has placeholder values."; return; }
+  if (!firebase.apps.length) firebase.initializeApp(c);
+  db = firebase.firestore();
+  auth = firebase.auth();
+  auth.onAuthStateChanged(user => {           // runs on load and after every sign-in or sign-out
+    $("who").textContent = user ? "Signed in as " + user.email : "Sign in to upload. Only accounts listed in firestore.rules can add samples.";
+    $("signIn").hidden = !!user;
+    $("signOut").hidden = !user;
+    setButtons(!!user);
+  });
+})();
+
+$("signIn").addEventListener("click", async () => {
+  const provider = new firebase.auth.GoogleAuthProvider();
+  try {
+    await auth.signInWithPopup(provider);
+  } catch (err) {
+    if (err.code === "auth/popup-blocked" || err.code === "auth/operation-not-supported-in-this-environment") {
+      return auth.signInWithRedirect(provider);          // fall back to a full-page sign-in
+    }
+    log("Sign-in failed: " + ({
+      "auth/unauthorized-domain": "this website isn't on Firebase's list. Add it under Authentication > Settings > Authorized domains.",
+      "auth/operation-not-allowed": "Google sign-in is turned off. Turn it on under Authentication > Sign-in method.",
+      "auth/popup-closed-by-user": "the sign-in window was closed before finishing.",
+    }[err.code] || err.message));
+  }
+});
+$("signOut").addEventListener("click", () => auth.signOut());
+
+// ---------- Upload ----------
+async function upload(docs, collection = "wastewater", idOf = sampleId) {
+  if (!db || !auth.currentUser) return log("Sign in first.");
+  setButtons(false);
+  try {
+    // Skip samples that are already stored (same site + target + date).
+    const minDate = docs.map(d => d.date).sort()[0];
+    const existing = new Set((await db.collection(collection).where("date", ">=", minDate).get()).docs.map(d => d.id));
+    const fresh = docs.filter(d => !existing.has(idOf(d)));
+    const unique = [...new Map(fresh.map(d => [idOf(d), d])).values()];   // duplicates inside the file too
+    const skipped = docs.length - unique.length;
+    if (!unique.length) { log("Nothing new to upload. All " + docs.length + " samples are already in the database."); return; }
+
+    for (let i = 0; i < unique.length; i += 400) {          // a batch holds at most 500 writes
+      const batch = db.batch();
+      unique.slice(i, i + 400).forEach(d => batch.set(db.collection(collection).doc(idOf(d)), d));
+      await batch.commit();
+      log("Uploaded " + Math.min(i + 400, unique.length) + " of " + unique.length + "…");
+    }
+    log("Done. Uploaded " + unique.length + " samples" + (skipped ? "; skipped " + skipped + " already stored." : "."));
+  } catch (err) {
+    log("Stopped: " + (err.code === "permission-denied"
+      ? "the database refused. Check that " + auth.currentUser.email + " is listed in isLabUploader() in firestore.rules, and that the rules are published."
+      : err.message));
+  } finally {
+    setButtons(!!auth.currentUser);
+  }
+}
+
+$("file").addEventListener("change", e => { const f = e.target.files[0]; if (f) f.text().then(t => { $("csv").value = t; }); });
+$("go").addEventListener("click", () => {
+  const { docs, errors } = parseCsv($("csv").value);
+  if (errors.length) return log("Nothing uploaded. Fix these first:\n" + errors.slice(0, 10).join("\n") + (errors.length > 10 ? "\n…and " + (errors.length - 10) + " more" : ""));
+  if (!docs.length) return log("No rows found.");
+  upload(docs);
+});
+$("demo").addEventListener("click", () => upload(buildDemo()));
+
+$("lfile").addEventListener("change", e => { const f = e.target.files[0]; if (f) f.text().then(t => { $("lcsv").value = t; }); });
+$("lgo").addEventListener("click", () => {
+  const { docs, errors } = parseLineageCsv($("lcsv").value);
+  if (errors.length) return log("Nothing uploaded. Fix these first:\n" + errors.slice(0, 10).join("\n") + (errors.length > 10 ? "\n…and " + (errors.length - 10) + " more" : ""));
+  if (!docs.length) return log("No rows found.");
+  upload(docs, "lineages", lineageId);
+});
+$("ldemo").addEventListener("click", () => upload(buildLineageDemo(), "lineages", lineageId));
+</script>
+</body>
+</html>

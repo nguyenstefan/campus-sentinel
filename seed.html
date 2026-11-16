@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Load example reports</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#8C1D40">
+<link rel="icon" type="image/png" href="icon-192.png">
+<!--
+  SEED PAGE - adds 38 made-up symptom reports to the database for demos.
+  Dates are relative to the day you click the button, so run it on the day of the demo.
+  Every report is marked demo:true, so the dashboard can hide them ("Include example data").
+  The wastewater examples (wastewater-import.html) are planted to line up with these clusters:
+    Hassayampa   stomach illness (9 reports)   <- norovirus rising in that building's wastewater
+    Gordon Commons (Downtown) flu-like (7)     <- influenza A rising in Downtown campus wastewater
+    Tempe campus stomach illness (3 more)      <- norovirus rising in Tempe campus wastewater
+    West Valley salmonella                     <- wastewater ONLY, no reports (an early warning)
+-->
+<style>
+  :root { --bg:#F6F4F5; --surface:#FFFFFF; --ink:#1F1A1C; --ink-2:#5E5459; --line:#DDD5D9; --accent:#8C1D40; --accent-ink:#FFFFFF; --ok:#2F7A4F; --bad:#B3261E; }
+  @media (prefers-color-scheme: dark) { :root { color-scheme: dark; --bg:#151113; --surface:#1F1A1C; --ink:#F2EDEF; --ink-2:#B5ABB0; --line:#3B3337; --accent:#E57A99; --accent-ink:#1A0A10; --ok:#71CF99; --bad:#F2B8B5; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; padding:env(safe-area-inset-top,0px) 16px 32px; }
+  main { max-width:560px; margin:0 auto; display:grid; gap:14px; padding-top:20px; }
+  h1 { margin:0; font-size:1.4rem; }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; display:grid; gap:10px; }
+  button { font:inherit; font-weight:600; background:var(--accent); color:var(--accent-ink); border:0; border-radius:10px; padding:12px 16px; min-height:44px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .muted { color:var(--ink-2); margin:0; }
+  #msg.ok { color:var(--ok); } #msg.err { color:var(--bad); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Load example reports</h1>
+  <div class="card">
+    <p class="muted">Adds 38 made-up symptom reports (marked as example data) so the dashboard has something to show: two cluster alerts and some background illness. Run it on the day of your demo.</p>
+    <button id="go" disabled>Add 38 example reports</button>
+    <p id="msg" role="status" aria-live="polite">Connecting…</p>
+    <p class="muted">Already ran it? Running it again does nothing. To start over, delete the <b>reports</b> collection in the Firebase console, then run it again.</p>
+    <p class="muted"><a href="./">Open the dashboard</a> · <a href="wastewater-import.html">Load wastewater examples</a> · <a href="feed.html">Demo feed</a></p>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js?v=5"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+function isoDate(daysAgo) {                       // local calendar date, YYYY-MM-DD
+  const d = new Date(); d.setDate(d.getDate() - daysAgo);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// [residence, campus attended, days ago it started, symptoms, severity, close contacts sick, shared meal, max temp F or null]
+const GI = ["vomiting", "diarrhea", "nausea", "cramps"];
+const FLU = ["fever", "cough", "aches", "chills", "sorethroat"];
+const ROWS = [
+  // Hassayampa: stomach illness cluster, building up over 5 days (9)
+  ["tempe-hassayampa", "tempe", 5, ["nausea", "vomiting", "diarrhea"], "moderate", "no", true, null],
+  ["tempe-hassayampa", "tempe", 4, ["vomiting", "diarrhea", "cramps"], "moderate", "yes", true, null],
+  ["tempe-hassayampa", "tempe", 4, ["nausea", "vomiting", "cramps"], "mild", "yes", true, null],
+  ["tempe-hassayampa", "tempe", 3, GI, "moderate", "yes", true, 100.2],
+  ["tempe-hassayampa", "tempe", 3, ["vomiting", "diarrhea", "headache"], "moderate", "yes", false, null],
+  ["tempe-hassayampa", "tempe", 2, GI, "severe", "yes", false, 101.1],
+  ["tempe-hassayampa", "tempe", 2, ["nausea", "vomiting", "diarrhea", "fatigue"], "moderate", "yes", false, null],
+  ["tempe-hassayampa", "tempe", 1, ["vomiting", "diarrhea", "cramps"], "mild", "yes", false, null],
+  ["tempe-hassayampa", "tempe", 0, ["nausea", "vomiting", "diarrhea"], "moderate", "yes", false, null],
+  // Gordon Commons (Downtown): flu-like cluster (7)
+  ["dtphx-taylor", "downtown", 4, ["fever", "cough", "aches", "chills"], "moderate", "no", false, 101.4],
+  ["dtphx-taylor", "downtown", 3, FLU, "moderate", "yes", false, 102.0],
+  ["dtphx-taylor", "downtown", 3, ["fever", "cough", "aches", "fatigue"], "moderate", "yes", false, 101.8],
+  ["dtphx-taylor", "downtown", 2, ["fever", "chills", "aches", "headache", "cough"], "moderate", "yes", false, 102.6],
+  ["dtphx-taylor", "downtown", 2, FLU, "severe", "yes", false, 103.1],
+  ["dtphx-taylor", "downtown", 1, ["fever", "cough", "aches", "sorethroat"], "mild", "yes", false, 100.9],
+  ["dtphx-taylor", "downtown", 0, ["fever", "cough", "chills", "aches"], "moderate", "yes", false, 101.5],
+  // Rest of Tempe campus: a few more stomach illnesses (3)
+  ["tempe-tooker", "tempe", 3, ["nausea", "vomiting", "diarrhea"], "moderate", "unsure", false, null],
+  ["tempe-tooker", "tempe", 1, ["vomiting", "cramps", "diarrhea"], "mild", "no", false, null],
+  ["tempe-manzanita", "tempe", 2, ["nausea", "diarrhea", "cramps"], "mild", "no", false, null],
+  // Background: scattered, unrelated illness (19)
+  ["tempe-barrett", "tempe", 6, ["nose", "sorethroat", "cough"], "mild", "no", false, null],
+  ["tempe-barrett", "tempe", 2, ["headache", "fatigue"], "mild", "no", false, null],
+  ["tempe-manzanita", "tempe", 5, ["nose", "sinus", "headache"], "mild", "no", false, null],
+  ["tempe-vds", "tempe", 4, ["cough", "nose", "sorethroat"], "mild", "unsure", false, null],
+  ["tempe-vds", "tempe", 0, ["eyes", "nose"], "mild", "no", false, null],
+  ["tempe-sonora", "tempe", 3, ["sorethroat", "glands", "fever"], "moderate", "no", false, 100.6],
+  ["tempe-sonora", "tempe", 6, ["fatigue", "aches"], "mild", "no", false, null],
+  ["tempe-other", "tempe", 1, ["cough", "nose"], "mild", "no", false, null],
+  ["off-tempe", "tempe", 5, ["nose", "cough", "sorethroat"], "mild", "no", false, null],
+  ["off-tempe", "tempe", 2, ["rash", "itchy"], "mild", "no", false, null],
+  ["off-tempe", "tempe", 0, ["nausea", "headache"], "mild", "no", false, null],
+  ["off-home", "tempe", 3, ["cough", "fatigue", "headache"], "mild", "no", false, null],
+  ["off-home", "online", 4, ["nose", "sinus"], "mild", "no", false, null],
+  ["off-dtphx", "downtown", 2, ["sorethroat", "nose"], "mild", "no", false, null],
+  ["dtphx-other", "downtown", 5, ["eyes", "itchy"], "mild", "no", false, null],
+  ["poly-century", "poly", 3, ["cough", "nose", "headache"], "mild", "no", false, null],
+  ["poly-other", "poly", 1, ["headache", "fatigue", "aches"], "mild", "no", false, null],
+  ["west-casadeoro", "west", 2, ["nose", "sorethroat"], "mild", "unsure", false, null],
+  ["west-other", "west", 4, ["rash", "itchy", "eyes"], "mild", "no", false, null],
+];
+
+const reports = () => ROWS.map(([residence, campus, ago, symptoms, severity, contacts, sharedMeal, temp], i) => {
+  const r = { campuses: [campus], residence, onset: isoDate(ago), symptoms, severity, contacts,
+              sharedMeal, travel: false, sawProvider: severity === "severe", submittedAt: new Date().toISOString(), demo: true };
+  if (temp !== null) r.maxTempF = temp;
+  return { id: "demo-seed-" + String(i + 1).padStart(2, "0"), data: r };
+});
+
+let db = null;
+(function start() {
+  const c = window.FIREBASE_CONFIG;
+  if (!window.firebase || !c || String(c.projectId).startsWith("PASTE")) {
+    $("msg").className = "err"; $("msg").textContent = "Not connected. firebase-config.js is missing or still has PASTE_ values."; return;
+  }
+  firebase.initializeApp(c); db = firebase.firestore();
+  $("msg").textContent = "Ready."; $("go").disabled = false;
+})();
+
+$("go").addEventListener("click", async () => {
+  $("go").disabled = true; $("msg").className = ""; $("msg").textContent = "Adding reports…";
+  let added = 0, skipped = 0, failed = 0, code = "";
+  for (const { id, data } of reports()) {
+    try {
+      const ref = db.collection("reports").doc(id);
+      if ((await ref.get()).exists) { skipped++; continue; }   // rules allow create only, so never overwrite
+      await ref.set(data); added++;
+    } catch (e) { failed++; code = e.code || e.message; }
+  }
+  if (failed) { $("msg").className = "err"; $("msg").textContent = `${added} added, ${failed} failed (${code}). Check that the latest firestore.rules is published.`; }
+  else if (!added) { $("msg").textContent = "The example reports are already loaded (" + skipped + " found). Delete the reports collection to reload with new dates."; }
+  else { $("msg").className = "ok"; $("msg").textContent = `Added ${added} example reports${skipped ? " (" + skipped + " were already there)" : ""}. Open the dashboard.`; }
+  $("go").disabled = false;
+});
+</script>
+</body>
+</html>
